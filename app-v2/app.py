@@ -1,96 +1,63 @@
-pipeline {
-    agent any
+import os
+import socket
+import logging
+from flask import Flask, jsonify
 
-    environment {
-        DOCKERHUB  = "vrak45"
-        APP        = "zero-demo"
-        GREEN_PORT = "5002"
-        BLUE_PORT  = "5001"
-        UPSTREAM   = "/etc/nginx/conf.d/active_upstream.conf"
+APP_VERSION = "v2"
+APP_NAME = "zero-downtime-demo"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(APP_NAME)
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+    logger.info("Serving index page from version %s", APP_VERSION)
+    return (
+        f"<html><body>"
+        f"<h1>Version 2 - New Release</h1>"
+        f"<p>Application: {APP_NAME}</p>"
+        f"<p>Version: {APP_VERSION}</p>"
+        f"<p>Served by container: {socket.gethostname()}</p>"
+        f"</body></html>"
+    )
+
+
+@app.route("/health")
+def health():
+    payload = {
+        "status": "healthy",
+        "version": APP_VERSION,
+        "app": APP_NAME,
+        "hostname": socket.gethostname(),
     }
+    logger.info("Health check hit: %s", payload)
+    return jsonify(payload), 200
 
-    stages {
-        stage('Checkout') {
-            steps { checkout scm }
-        }
 
-        stage('Build v2') {
-            steps {
-                sh "docker build -t ${DOCKERHUB}/${APP}:v2 ./app-v2"
-            }
-        }
+@app.route("/version")
+def version():
+    return jsonify({"version": APP_VERSION, "app": APP_NAME}), 200
 
-        stage('Push v2') {
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-credentials',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
-                    sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
-                    sh "docker push ${DOCKERHUB}/${APP}:v2"
-                }
-            }
-        }
 
-        stage('Deploy v2 (green)') {
-            steps {
-                sh '''
-                    docker rm -f app-v2 >/dev/null 2>&1 || true
-                    for i in $(seq 1 30); do
-                        if ! docker ps -a --format '{{.Names}}' | grep -qx app-v2; then
-                            break
-                        fi
-                        echo "waiting for old app-v2 to be removed... attempt $i"
-                        sleep 1
-                    done
-                    docker run -d --name app-v2 -p 5002:5000 vrak45/zero-demo:v2
-                '''
-            }
-        }
+@app.errorhandler(404)
+def not_found(error):
+    logger.warning("404 for request: %s", error)
+    return jsonify({"error": "not found", "version": APP_VERSION}), 404
 
-        stage('Health check v2') {
-            steps {
-                script {
-                    def healthy = false
-                    for (int i = 0; i < 10; i++) {
-                        def code = sh(script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:${GREEN_PORT}/health || true", returnStdout: true).trim()
-                        def body = sh(script: "curl -s http://localhost:${GREEN_PORT}/health || true", returnStdout: true).trim()
-                        if (code == "200" && body.contains('"status":"healthy"')) {
-                            healthy = true
-                            echo "v2 healthy on attempt ${i + 1}"
-                            break
-                        }
-                        echo "waiting for v2... attempt ${i + 1}"
-                        sleep 3
-                    }
-                    if (!healthy) {
-                        error "v2 failed health check — aborting before traffic switch"
-                    }
-                }
-            }
-        }
 
-        stage('Switch traffic to v2') {
-            steps {
-                sh "sudo sed -i 's#server 127.0.0.1:${BLUE_PORT};#server 127.0.0.1:${GREEN_PORT};#' ${UPSTREAM}"
-                sh "sudo nginx -t"
-                sh "sudo systemctl reload nginx"
-                sh "curl -sf http://localhost/version | grep '\"version\":\"v2\"'"
-            }
-        }
-    }
+@app.errorhandler(500)
+def server_error(error):
+    logger.error("500 for request: %s", error)
+    return jsonify({"error": "internal server error", "version": APP_VERSION}), 500
 
-    post {
-        success {
-            echo "v2 live. app-v1 kept running as standby for rollback."
-        }
-        failure {
-            echo "Pipeline failed — rolling traffic back to v1 and removing v2."
-            sh "sudo sed -i 's#server 127.0.0.1:${GREEN_PORT};#server 127.0.0.1:${BLUE_PORT};#' ${UPSTREAM} || true"
-            sh "sudo nginx -t || true"
-            sh "sudo systemctl reload nginx || true"
-            sh "docker rm -f app-v2 || true"
-        }
-    }
-}
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    logger.info("Starting %s %s on port %s (dev server)", APP_NAME, APP_VERSION, port)
+    app.run(host="0.0.0.0", port=port)
