@@ -37,7 +37,7 @@ def health():
         "hostname": socket.gethostname(),
     }
     logger.info("Health check hit: %s", payload)
-    return jsonify(payload), 200
+        return jsonify({"status": "broken", "version": APP_VERSION}), 500
 
 
 @app.route("/version")
