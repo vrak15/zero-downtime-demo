@@ -34,11 +34,20 @@ pipeline {
         }
 
         stage('Deploy v2 (green)') {
-            steps {
-                sh "docker rm -f app-v2 || true"
-                sh "docker run -d --name app-v2 -p ${GREEN_PORT}:5000 ${DOCKERHUB}/${APP}:v2"
-            }
-        }
+    steps {
+        sh '''
+            docker rm -f app-v2 >/dev/null 2>&1 || true
+            for i in $(seq 1 30); do
+                if ! docker ps -a --format '{{.Names}}' | grep -qx app-v2; then
+                    break
+                fi
+                echo "waiting for old app-v2 to be removed... attempt $i"
+                sleep 1
+            done
+            docker run -d --name app-v2 -p 5002:5000 vrak45/zero-demo:v2
+        '''
+    }
+}
 
         stage('Health check v2') {
             steps {
